@@ -7,7 +7,7 @@
 #include <arpa/inet.h>
 
 int PORT = 8080;
-int main (int argc, char** argv) {
+int main () {
 
     int sock_fd = socket(AF_INET, SOCK_STREAM, 0);
     if (sock_fd < 0) {

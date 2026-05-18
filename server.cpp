@@ -1,12 +1,31 @@
 #include <cstring>
 #include <iostream>
+#include <thread>
 #include <unistd.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
 
 
 int PORT = 8080;
-int main (int argc, char** argv) {
+
+void handle_client(int client_fd) {
+    char buffer[1024];
+    while (true) {
+        memset(buffer, 0, sizeof(buffer));
+        int recvd_bytes = recv(client_fd, buffer, sizeof(buffer), 0);
+
+        if (recvd_bytes <= 0) {
+            std::cout << "Client Disconneted or link dropped, breaking loop\n";
+            break;
+        }
+        std::cout << "Received From Client " << buffer << std::endl;
+        send(client_fd, buffer, recvd_bytes, 0);
+    }
+
+    //cleanup
+    close(client_fd);
+}
+int main () {
 
     // make the socket 
     int server_fd = socket(AF_INET, SOCK_STREAM, 0);
@@ -36,39 +55,29 @@ int main (int argc, char** argv) {
         return 1;
     }
 
-    std::cout << "Server is Listening on PORT: " << PORT << std::endl;
+    std::cout << "Multi-Threaded Server is Listening on PORT: " << PORT << std::endl;
 
     // accept connection now
     // lets prepare storage for the client stuff
-
-    sockaddr_in client_addr{};
-    socklen_t client_len = sizeof(client_addr);
-
-    int client_fd = accept(server_fd, (struct sockaddr *)&client_addr, &client_len);
-    if (client_fd < 0) {
-        std::cerr << "Error: Failed to accept client connection";
-        close (server_fd);
-        return 1;
-    }
-
-    std::cout << "Connection Established, a dedicated worker was created for client connection" << std::endl;
-
-    char buffer[1024];
-
     while (true) {
-        memset(buffer, 0, sizeof(buffer));
-        int recvd_bytes = recv(client_fd, buffer, sizeof(buffer), 0);
 
-        if (recvd_bytes <= 0) {
-            std::cout << "Client Disconneted or link dropped, breaking loop\n";
-            break;
+        sockaddr_in client_addr{};
+        socklen_t client_len = sizeof(client_addr);
+
+        int client_fd = accept(server_fd, (struct sockaddr *)&client_addr, &client_len);
+        if (client_fd < 0) {
+            std::cerr << "Error: Failed to accept client connection";
+            close (server_fd);
+            return 1;
         }
-        std::cout << "Received From Client " << buffer << std::endl;
-        send(client_fd, buffer, recvd_bytes, 0);
+        std::cout << "New connection accepted! Launching dedicated background thread...\n";
+        std::thread worker(handle_client, client_fd);
+
+        // don't do worker.join() because it will block the main thread from going back to listening
+        // instead do detach so that os will handle is automatically independent of the main thread
+        worker.detach();
     }
 
-    //cleanup
-    close(client_fd);
     close(server_fd);
     std::cout << "Server Resources Release\n";
     return 0;
