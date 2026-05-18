@@ -1,6 +1,7 @@
 #include <cstring>
 #include <iostream>
 #include <string>
+#include <system_error>
 #include <unistd.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
@@ -36,17 +37,26 @@ int main () {
 
     std::cout << "Connected to server successfully\n";
 
-    std::string message = "Hello from the first client\n";
-    send(sock_fd, message.c_str(), message.length(), 0);
-    std::cout << "Sent: " << message << std::endl;
-    char buffer[1024];
-    int recvd_bytes = recv(sock_fd, buffer, sizeof(buffer), 0);
-    if (recvd_bytes > 0) {
-        std::cout << "Server Echoed back " << buffer << std::endl;
-    }
+    std::string message;
+    while (true) {
 
+        std::cout << "> ";
+        std::getline(std::cin, message);
+        if (message == "exit") break;
+        if (message.empty()) continue;
+        send(sock_fd, message.c_str(), message.length(), 0);
+        char buffer[1024];
+        int recvd_bytes = recv(sock_fd, buffer, 1024, 0);
+        if (recvd_bytes > 0) {
+            buffer[recvd_bytes] = 0;
+            std::cout << "Server Echoed back: " << buffer << "\n";
+        }
+        else {
+            std::cout << "Server Disconnected\n";
+            break;
+        }
+    }
     // close the connection
     close(sock_fd);
-    std::cout << "Closed socked\n";
     return 0;
 }

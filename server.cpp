@@ -4,7 +4,8 @@
 #include <unistd.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
-
+#include <vector>
+#include <poll.h>
 
 int PORT = 8080;
 
@@ -30,7 +31,7 @@ int main () {
     // make the socket 
     int server_fd = socket(AF_INET, SOCK_STREAM, 0);
     if (server_fd < 0) {
-        std::cerr << "Error: Master Socket Creation failed.";
+        std::cerr << "Error: Master Socket Creation failed.\n";
         return 1;
     }
 
@@ -41,41 +42,76 @@ int main () {
     server_addr.sin_addr.s_addr = INADDR_ANY;   // bind to the local ip address and use every network card available
 
     // bind the socket to the information above like port and ip
+    int opt = 1;
+    if (setsockopt(server_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt)) < 0) {
+        std::cerr << "setsockopt failed.\n";
+        close(server_fd);
+        return 1;
+    }
 
     if (bind(server_fd, (sockaddr *) &server_addr, sizeof(server_addr)) < 0) {
-        std::cerr << "Error: Failed to bind to port Master Socket";
+        std::cerr << "Error: Failed to bind to port Master Socket.\n";
         close(server_fd);
         return 1;
     }
 
     // start listening for requests 
     if (listen(server_fd, 10) < 0) {
-        std::cerr << "Error: Listening Failed";
+        std::cerr << "Error: Listening Failed.\n";
         close(server_fd);
         return 1;
     }
 
     std::cout << "Multi-Threaded Server is Listening on PORT: " << PORT << std::endl;
 
+    std::vector<struct pollfd> fds;
+    fds.push_back({server_fd, POLLIN, 0});
+
     // accept connection now
     // lets prepare storage for the client stuff
     while (true) {
 
-        sockaddr_in client_addr{};
-        socklen_t client_len = sizeof(client_addr);
+        int service = poll(fds.data(), fds.size(), -1);
 
-        int client_fd = accept(server_fd, (struct sockaddr *)&client_addr, &client_len);
-        if (client_fd < 0) {
-            std::cerr << "Error: Failed to accept client connection";
-            close (server_fd);
-            return 1;
+        if (service < 0) {
+            std::cerr << "Error: Poll System Call Failed\n";
+            break;
         }
-        std::cout << "New connection accepted! Launching dedicated background thread...\n";
-        std::thread worker(handle_client, client_fd);
+        int current_size = fds.size();
+        for (int i=0; i<current_size; i++) {
 
-        // don't do worker.join() because it will block the main thread from going back to listening
-        // instead do detach so that os will handle is automatically independent of the main thread
-        worker.detach();
+            if (fds[i].revents & POLLIN) {
+
+                // server had some incoming request (new connection request)
+                if (fds[i].fd == server_fd) {
+
+                    sockaddr_in client_addr{};
+                    socklen_t client_len = sizeof(client_addr);
+                    int client_fd = accept(server_fd, (struct sockaddr*)&client_addr, &client_len);
+                    if (client_fd >= 0) {
+                        fds.push_back({client_fd, POLLIN, 0});
+                    }
+                }
+                else {
+                    // one of the client fds was hit, so we have an message incoming
+                    char buffer[1024];
+                    memset(buffer, 0, 1024);
+                    int bytes_received = recv(fds[i].fd, buffer, 1024, 0);
+                    if (bytes_received <= 0) {
+                        std::cout << "Client Descriptor: " << fds[i].fd << " disconnected.\n";
+                        close(fds[i].fd);
+                        fds.erase(fds.begin() + i);
+                        i--;
+                        current_size--;
+                    }
+                    else {
+                        buffer[bytes_received] = '\0';
+                        std::cout << "Socket " << fds[i].fd << " Sent: " << buffer << "\n";
+                        send(fds[i].fd, buffer, bytes_received, 0);
+                    }
+                }
+            }
+        }
     }
 
     close(server_fd);
