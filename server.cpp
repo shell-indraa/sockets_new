@@ -1,31 +1,20 @@
+#include <cerrno>
+#include <cstddef>
+#include <cstdint>
 #include <cstring>
 #include <iostream>
-#include <thread>
 #include <unistd.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <vector>
 #include <poll.h>
+#include <sys/event.h>
+#include <fcntl.h>
+
 
 int PORT = 8080;
 
-void handle_client(int client_fd) {
-    char buffer[1024];
-    while (true) {
-        memset(buffer, 0, sizeof(buffer));
-        int recvd_bytes = recv(client_fd, buffer, sizeof(buffer), 0);
 
-        if (recvd_bytes <= 0) {
-            std::cout << "Client Disconneted or link dropped, breaking loop\n";
-            break;
-        }
-        std::cout << "Received From Client " << buffer << std::endl;
-        send(client_fd, buffer, recvd_bytes, 0);
-    }
-
-    //cleanup
-    close(client_fd);
-}
 int main () {
 
     // make the socket 
@@ -34,7 +23,11 @@ int main () {
         std::cerr << "Error: Master Socket Creation failed.\n";
         return 1;
     }
-
+    // make it non blocking
+    if (fcntl(server_fd, F_SETFL, O_NONBLOCK)<0) {
+        std::cerr << "Failed to make socket Non Blocking.";
+        return 1;
+    }
     // fill in the details related to the socket
     sockaddr_in server_addr{};
     server_addr.sin_family = AF_INET;   // define the version of socket (ipv4 or 6)
@@ -48,13 +41,11 @@ int main () {
         close(server_fd);
         return 1;
     }
-
     if (bind(server_fd, (sockaddr *) &server_addr, sizeof(server_addr)) < 0) {
         std::cerr << "Error: Failed to bind to port Master Socket.\n";
         close(server_fd);
         return 1;
     }
-
     // start listening for requests 
     if (listen(server_fd, 10) < 0) {
         std::cerr << "Error: Listening Failed.\n";
@@ -64,56 +55,64 @@ int main () {
 
     std::cout << "Multi-Threaded Server is Listening on PORT: " << PORT << std::endl;
 
-    std::vector<struct pollfd> fds;
-    fds.push_back({server_fd, POLLIN, 0});
+    // make a kqueue on the kernel
+    int kq = kqueue();
+    if (kq < 0) {
+        std::cerr << "Failed to make Kqueue.\n";
+        return 1;
+    }
 
-    // accept connection now
-    // lets prepare storage for the client stuff
+    struct kevent changelist;
+    EV_SET(&changelist, server_fd, EVFILT_READ, EV_ADD | EV_ENABLE, 0, 0, 0);
+    if (kevent(kq, &changelist, 1, NULL, 0, NULL) < 0) {
+        std::cerr << "Failed to register server socket with kqueue.\n";
+        return 1;
+    }
+
+    struct kevent event_list[32];
     while (true) {
 
-        int service = poll(fds.data(), fds.size(), -1);
+        int num_events = kevent(kq, NULL, 0, event_list, 32, 0);
 
-        if (service < 0) {
-            std::cerr << "Error: Poll System Call Failed\n";
+        if (num_events < 0) {
+            if (errno == EINTR) continue;
+            std::cerr << "Error: kevent System Call Failed\n";
             break;
         }
-        int current_size = fds.size();
-        for (int i=0; i<current_size; i++) {
+        for (int i=0; i<num_events; i++) {
 
-            if (fds[i].revents & POLLIN) {
-
-                // server had some incoming request (new connection request)
-                if (fds[i].fd == server_fd) {
-
-                    sockaddr_in client_addr{};
-                    socklen_t client_len = sizeof(client_addr);
-                    int client_fd = accept(server_fd, (struct sockaddr*)&client_addr, &client_len);
-                    if (client_fd >= 0) {
-                        fds.push_back({client_fd, POLLIN, 0});
-                    }
+            // server had some incoming request (new connection request)
+            if (event_list[i].ident == static_cast<uintptr_t>(server_fd)) {
+                sockaddr_in client_addr{};
+                socklen_t client_len = sizeof(client_addr);
+                int client_fd = accept(server_fd, (struct sockaddr*)&client_addr, &client_len);
+                if (client_fd >= 0) {
+                    fcntl(client_fd, F_SETFL, O_NONBLOCK);
+                    struct kevent new_client;
+                    EV_SET(&new_client, client_fd, EVFILT_READ, EV_ADD | EV_ENABLE, 0, 0, 0);
+                    kevent(kq, &new_client, 1, 0, 0, 0);
+                    std::cout << "Engine Registered new Client: " << client_fd << "\n";
                 }
-                else {
-                    // one of the client fds was hit, so we have an message incoming
-                    char buffer[1024];
-                    memset(buffer, 0, 1024);
-                    int bytes_received = recv(fds[i].fd, buffer, 1024, 0);
-                    if (bytes_received <= 0) {
-                        std::cout << "Client Descriptor: " << fds[i].fd << " disconnected.\n";
-                        close(fds[i].fd);
-                        fds.erase(fds.begin() + i);
-                        i--;
-                        current_size--;
-                    }
-                    else {
-                        buffer[bytes_received] = '\0';
-                        std::cout << "Socket " << fds[i].fd << " Sent: " << buffer << "\n";
-                        send(fds[i].fd, buffer, bytes_received, 0);
-                    }
+            }
+            else {
+                // one of the client fds was hit, so we have an message incoming
+                char buffer[1024];
+                memset(buffer, 0, 1024);
+                int bytes_received = recv(event_list[i].ident, buffer, 1024, 0);
+                if (bytes_received > 0) {
+                    buffer[bytes_received] = '\0';
+                    std::cout << "FD: " << event_list[i].ident << "Sent: " << buffer << "\n";
+                    send(event_list[i].ident, buffer, bytes_received, 0);
+                }
+                else if (bytes_received == 0) {
+                    std::cout << "Client Descriptor: " << event_list[i].ident << " disconnected.\n";
+                    close(event_list[i].ident);
+                    // Closing the FD automatically purges it from the kernel kqueue!
                 }
             }
         }
     }
-
+    close(kq);
     close(server_fd);
     std::cout << "Server Resources Release\n";
     return 0;
